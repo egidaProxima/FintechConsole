@@ -12,5 +12,7 @@ public interface ITransactionService
     public Task<decimal> GetTotalSpentByCategoryAsync(int userId, string category);
 
     public Task<bool> IsSuspiciousActivityAsync(int userId);
+    public Task<bool> WithdrawCashbackAsync(int userId);
+
 
 }

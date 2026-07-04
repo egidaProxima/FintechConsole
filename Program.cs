@@ -30,6 +30,24 @@ using (var context = new AppDbContext())
     Console.WriteLine($"Пользователь: {ivan?.Name}");
     Console.WriteLine($"Основной баланс: {ivan?.Balance} руб.");
     Console.WriteLine($"Баланс копилки (Кешбэк): {ivan?.CashbackBalance} руб. (Ожидаем строго 12.35!)");
+
+    Console.WriteLine("\n[Тест 15] Иван выводит накопленный кешбэк (12.35 руб) на карту...");
+
+    // Проверяем балансы Ивана до вывода кешбэка
+    var ivanBeforeWithdraw = await context.Users.FindAsync(ivanId);
+    Console.WriteLine($"Основной счет до вывода: {ivanBeforeWithdraw?.Balance} руб.");
+    Console.WriteLine($"Копилка до вывода: {ivanBeforeWithdraw?.CashbackBalance} руб.");
+
+    // Вызываем твой новый метод!
+    var isWithdrawSuccess = await transactionService.WithdrawCashbackAsync(ivanId);
+    Console.WriteLine($"Результат вывода кешбэка: {isWithdrawSuccess}");
+
+    // Проверяем балансы после вывода
+    var ivanAfterWithdraw = await context.Users.FindAsync(ivanId);
+    Console.WriteLine($"\n=== Итог вывода кешбэка ===");
+    Console.WriteLine($"Основной счет после вывода: {ivanAfterWithdraw?.Balance} руб.");
+    Console.WriteLine($"Копилка после вывода (должно быть 0): {ivanAfterWithdraw?.CashbackBalance} руб.");
+
 }
 
 Console.WriteLine("\nНажмите любую клавишу для завершения...");

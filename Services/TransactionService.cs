@@ -19,6 +19,25 @@ public class TransactionService : ITransactionService
     {
         return await _context.Users.FirstOrDefaultAsync(u => u.Id == userId);
     }
+    private async Task<User> GetValidatedUserAsync(int userId, decimal requiredAmount = 0m)
+    {
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == userId);
+
+        // Проверка 1: Существование
+        if (user == null)
+            throw new KeyNotFoundException($"Пользователь с ID {userId} не найден в базе данных.");
+
+        // Проверка 2: Блокировка
+        if (user.IsBlocked)
+            throw new InvalidOperationException($"Операция отклонена: Аккаунт пользователя ID {userId} ЗАБЛОКИРОВАН.");
+
+        // Проверка 3: Хватает ли денег (если передали сумму больше нуля)
+        if (requiredAmount > 0m && user.Balance < requiredAmount)
+            throw new InvalidOperationException($"Недостаточно средств у пользователя ID {userId}. Требуется: {requiredAmount} руб.");
+
+        return user;
+    }
+
 
     // МЕТОД 1: Регистрация пользователя (Пишет ментор)
     public async Task<bool> RegisterUserAsync(string name, decimal initialBalance)
@@ -47,36 +66,25 @@ public class TransactionService : ITransactionService
     {
         if (amount <= 0 || string.IsNullOrWhiteSpace(category)) return false;
 
-        var user = await FindUser(userId);
-        if (user == null || user.Balance < amount || user.IsBlocked) return false;
-
-        user.Balance -= amount;
-
-        // НОВАЯ ФИЧА: Считаем кешбэк
-        if (category == "Супермаркеты" || category == "Кафе")
+        try
         {
-            decimal rawCashback = amount * 0.01m; // 1% от суммы покупки
+            // Одна строчка делает ВСЕ проверки: ищет, проверяет блокировку и баланс!
+            var user = await GetValidatedUserAsync(userId, requiredAmount: amount);
 
-            // Применяем банковское округление до 2 знаков после запятой (до копеек)
-            decimal roundedCashback = Math.Round(rawCashback, 2);
+            user.Balance -= amount;
 
-            // Начисляем в копилку
-            user.CashbackBalance += roundedCashback;
-            Console.WriteLine($"[ЛОЯЛЬНОСТЬ] Начислен кешбэк за категорию '{category}': +{roundedCashback} руб. в копилку!");
+            if (category == "Супермаркеты" || category == "Кафе")
+            {
+                decimal roundedCashback = Math.Round(amount * 0.01m, 2);
+                user.CashbackBalance += roundedCashback;
+            }
+
+            var transaction = new Transaction { Amount = amount, Category = category, Timestamp = DateTime.UtcNow, UserId = userId };
+            await _context.Transactions.AddAsync(transaction);
+            await _context.SaveChangesAsync();
+            return true;
         }
-
-        var transaction = new Transaction
-        {
-            Amount = amount,
-            Category = category,
-            Timestamp = DateTime.UtcNow,
-            UserId = userId
-        };
-
-        await _context.Transactions.AddAsync(transaction);
-        await _context.SaveChangesAsync();
-
-        return true;
+        catch (Exception) { return false; }
     }
 
 
@@ -84,44 +92,26 @@ public class TransactionService : ITransactionService
     {
         if (senderId == receiverId || amount <= 0) return false;
 
-        var sender = await FindUser(senderId);
-        if (sender == null || sender.Balance < amount) return false;
-
-        if (sender.IsBlocked)
-        {
-            Console.WriteLine($"[БЕЗОПАСНОСТЬ] Отказано в переводе: Аккаунт ID {senderId} ЗАБЛОКИРОВАН.");
-            return false;
-        }
-
-        var receiver = await FindUser(receiverId);
-        if (receiver == null) return false;
-
-        using var dbTransaction = await _context.Database.BeginTransactionAsync();
-
         try
         {
+            // Проверяем отправителя (включая его баланс)
+            var sender = await GetValidatedUserAsync(senderId, requiredAmount: amount);
+            // Проверяем получателя (баланс не важен, передаем 0, но проверится блокировка и существование!)
+            var receiver = await GetValidatedUserAsync(receiverId, requiredAmount: 0m);
+
+            using var dbTransaction = await _context.Database.BeginTransactionAsync();
+
             sender.Balance -= amount;
             receiver.Balance += amount;
 
-            var transaction = new Transaction
-            {
-                UserId = senderId,
-                Amount = amount,
-                Category = $"перевод пользователю {receiverId}",
-                Timestamp = DateTime.UtcNow,
-            };
-
+            var transaction = new Transaction { UserId = senderId, Amount = amount, Category = $"Перевод пользователю {receiverId}", Timestamp = DateTime.UtcNow };
             await _context.Transactions.AddAsync(transaction);
+
             await _context.SaveChangesAsync();
             await dbTransaction.CommitAsync();
-
             return true;
         }
-        catch (Exception ex)
-        {
-            await dbTransaction.RollbackAsync();
-            return false;
-        }
+        catch (Exception) { return false; }
     }
 
     public async Task<List<Transaction>> GetHistoryAsync(int userId, int pageNumber, int pageSize)
@@ -166,4 +156,29 @@ public class TransactionService : ITransactionService
 
         return transactionsCount > 3;
     }
+
+    public async Task<bool> WithdrawCashbackAsync(int userId)
+    {
+        try
+        {
+            // Проверяем существование и блокировку
+            var user = await GetValidatedUserAsync(userId);
+            if (user.CashbackBalance <= 0) return false;
+
+            using var dbTransaction = await _context.Database.BeginTransactionAsync();
+
+            decimal cashbackAmount = user.CashbackBalance;
+            user.CashbackBalance = 0;
+            user.Balance += cashbackAmount;
+
+            var transaction = new Transaction { Amount = cashbackAmount, Category = "Вывод кешбэка на карту", Timestamp = DateTime.UtcNow, UserId = userId };
+            await _context.Transactions.AddAsync(transaction);
+
+            await _context.SaveChangesAsync();
+            await dbTransaction.CommitAsync();
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
 }
